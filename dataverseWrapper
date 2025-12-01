@@ -1,0 +1,152 @@
+// dataverseClient.ts
+export interface DataverseClient {
+  createRecord: (entityLogicalName: string, data: any) => Promise<any>;
+  retrieveRecord: (entityLogicalName: string, id: string, query?: string) => Promise<any>;
+  retrieveMultipleRecords: (entityLogicalName: string, query: string) => Promise<any>;
+  deleteRecord: (entityLogicalName: string, id: string) => Promise<void>;
+}
+
+export function createDataverseClient(
+  webAPI: ComponentFramework.WebApi
+): DataverseClient {
+  return {
+    createRecord: (entityLogicalName, data) =>
+      webAPI.createRecord(entityLogicalName, data),
+
+    retrieveRecord: (entityLogicalName, id, query = "") =>
+      webAPI.retrieveRecord(entityLogicalName, id, query),
+
+    retrieveMultipleRecords: (entityLogicalName, query) =>
+      webAPI.retrieveMultipleRecords(entityLogicalName, query),
+
+    deleteRecord: async (entityLogicalName, id) => {
+      await webAPI.deleteRecord(entityLogicalName, id);
+    },
+  };
+}
+
+// index.ts (PCF)
+import { createDataverseClient } from "./dataverse/dataverseClient";
+
+public init(context, notifyOutputChanged, state, container) {
+  this._context = context;
+  const dataverseClient = createDataverseClient(context.webAPI);
+
+  const element = React.createElement(App, {
+    dataverseClient,
+    emailId: context.parameters.emailId.raw ?? undefined,
+  });
+
+  ReactDOM.render(element, container);
+}
+
+// dataverse/attachmentsApi.ts
+import { DataverseClient } from "./dataverseClient";
+
+export interface AttachmentDto {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSizeInBytes?: number;
+  createdOn?: string;
+}
+
+export async function getEmailAttachments(
+  client: DataverseClient,
+  emailId: string
+): Promise<AttachmentDto[]> {
+  const cleanEmailId = emailId.replace(/[{}]/g, "");
+
+  const query =
+    `?$select=activitymimeattachmentid,filename,mimetype,filesize,createdon` +
+    `&$filter=_objectid_value eq ${cleanEmailId}`;
+
+  const result = await client.retrieveMultipleRecords("activitymimeattachment", query);
+
+  return result.entities.map((e: any) => ({
+    id: e.activitymimeattachmentid,
+    fileName: e.filename,
+    mimeType: e.mimetype,
+    fileSizeInBytes: e.filesize,
+    createdOn: e.createdon,
+  }));
+}
+
+export async function uploadEmailAttachments(
+  client: DataverseClient,
+  emailId: string,
+  files: FileList
+): Promise<void> {
+  const cleanEmailId = emailId.replace(/[{}]/g, "");
+
+  const uploadSingle = (file: File) =>
+    new Promise<void>((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onload = () => {
+        try {
+          const base64 = (reader.result as string).split(",")[1];
+
+          const record = {
+            "objectid_email@odata.bind": `/emails(${cleanEmailId})`,
+            body: base64,
+            mimetype: file.type || "application/octet-stream",
+            filename: file.name,
+            subject: file.name,
+          };
+
+          client
+            .createRecord("activitymimeattachment", record)
+            .then(() => resolve())
+            .catch(reject);
+        } catch (err) {
+          reject(err);
+        }
+      };
+
+      reader.onerror = (e) => reject(e);
+      reader.readAsDataURL(file);
+    });
+
+  await Promise.all(Array.from(files).map(uploadSingle));
+}
+
+export async function deleteAttachment(
+  client: DataverseClient,
+  attachmentId: string
+): Promise<void> {
+  await client.deleteRecord("activitymimeattachment", attachmentId);
+}
+
+export async function downloadAttachment(
+  client: DataverseClient,
+  attachmentId: string
+): Promise<void> {
+  // Fetch base64 body from Dataverse
+  const record = await client.retrieveRecord(
+    "activitymimeattachment",
+    attachmentId,
+    "?$select=body,filename,mimetype"
+  );
+
+  const base64 = record.body;
+  const filename = record.filename || "download";
+  const mimetype = record.mimetype || "application/octet-stream";
+
+  const byteCharacters = atob(base64);
+  const byteNumbers = new Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    byteNumbers[i] = byteCharacters.charCodeAt(i);
+  }
+  const byteArray = new Uint8Array(byteNumbers);
+  const blob = new Blob([byteArray], { type: mimetype });
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
