@@ -1,35 +1,20 @@
-export interface FileValidationResult {
-  valid: boolean;
-  errors: string[];
-  totalSize: number;
+function getErrorMessage(error: unknown): string {
+  if (!error) return "Unknown error";
+
+  if (error instanceof Error) return error.message;
+
+  const e = error as any;
+  if (e.body?.error?.message) return e.body.error.message;
+  if (e.message) return e.message;
+  if (e.errorMessage) return e.errorMessage;
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "An unexpected error occurred.";
+  }
 }
 
-export function validateFiles(
-  files: FileList,
-  maxFileSizeBytes: number,
-  maxTotalSizeBytes: number
-): FileValidationResult {
-  const errors: string[] = [];
-  let totalSize = 0;
-
-  for (const file of Array.from(files)) {
-    totalSize += file.size;
-
-    if (file.size > maxFileSizeBytes) {
-      errors.push(`File "${file.name}" exceeds the maximum size of ${formatFileSize(maxFileSizeBytes)}.`);
-    }
-  }
-
-  if (totalSize > maxTotalSizeBytes) {
-    errors.push(`Total selected files size exceeds the maximum allowed (${formatFileSize(maxTotalSizeBytes)}).`);
-  }
-
-  return {
-    valid: errors.length === 0,
-    errors,
-    totalSize,
-  };
-}
 
 
 
