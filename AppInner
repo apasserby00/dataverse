@@ -1,0 +1,203 @@
+// AppInner.tsx
+const AppInner: React.FC<AppProps> = ({ dataverseClient, emailId }) => {
+  const { data: attachments = [] } = useEmailAttachments(dataverseClient, emailId);
+
+  const bulkDeleteMutation = useBulkDeleteAttachments(dataverseClient, emailId);
+  const bulkDownloadMutation = useBulkDownloadAttachments(dataverseClient);
+
+  // 🔹 selection lives here
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
+
+  const allIds = React.useMemo(
+    () => attachments.map(a => a.id),
+    [attachments]
+  );
+
+  const allSelected =
+    attachments.length > 0 && selectedIds.size === attachments.length;
+  const someSelected =
+    selectedIds.size > 0 && selectedIds.size < attachments.length;
+  const hasSelection = selectedIds.size > 0;
+
+  const toggleOne = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    setSelectedIds(prev => {
+      if (prev.size === attachments.length) {
+        return new Set();
+      }
+      return new Set(allIds);
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // 🔹 header click handlers
+  const handleHeaderDelete = () => {
+    if (!hasSelection) return;
+    bulkDeleteMutation.mutate(Array.from(selectedIds));
+  };
+
+  const handleHeaderDownload = () => {
+    if (!hasSelection) return;
+    bulkDownloadMutation.mutate(Array.from(selectedIds));
+  };
+
+  // (toast effects from earlier fit here)
+
+  return (
+    <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+      <Header
+        // existing props…
+        isUploading={false /* your upload mutation */}
+        onClickUpload={() => fileInputRef.current?.click()}
+
+        // 🔹 new bulk actions
+        canBulkAct={hasSelection}
+        isDeleting={bulkDeleteMutation.isPending}
+        isDownloading={bulkDownloadMutation.isPending}
+        onBulkDelete={handleHeaderDelete}
+        onBulkDownload={handleHeaderDownload}
+      />
+
+      {/* file input etc. */}
+
+      <AttachmentList
+        attachments={attachments}
+        selectedIds={selectedIds}
+        allSelected={allSelected}
+        someSelected={someSelected}
+        onToggleOne={toggleOne}
+        onToggleAll={toggleAll}
+      />
+    </div>
+  );
+};
+
+
+
+---
+
+
+// Header.tsx
+import { Button } from "@fluentui/react-components";
+
+interface HeaderProps {
+  isUploading: boolean;
+  onClickUpload: () => void;
+
+  canBulkAct: boolean;
+  isDeleting: boolean;
+  isDownloading: boolean;
+  onBulkDelete: () => void;
+  onBulkDownload: () => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({
+  isUploading,
+  onClickUpload,
+  canBulkAct,
+  isDeleting,
+  isDownloading,
+  onBulkDelete,
+  onBulkDownload,
+}) => (
+  <header style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <Button
+      appearance="primary"
+      onClick={onClickUpload}
+      disabled={isUploading}
+    >
+      {isUploading ? "Uploading..." : "Upload"}
+    </Button>
+
+    <Button
+      appearance="secondary"
+      onClick={onBulkDownload}
+      disabled={!canBulkAct || isDownloading}
+    >
+      {isDownloading ? "Downloading..." : "Download selected"}
+    </Button>
+
+    <Button
+      appearance="secondary"
+      onClick={onBulkDelete}
+      disabled={!canBulkAct || isDeleting}
+    >
+      {isDeleting ? "Deleting..." : "Delete selected"}
+    </Button>
+  </header>
+);
+
+
+
+----
+
+
+
+// AttachmentList.tsx
+import {
+  Checkbox,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+} from "@fluentui/react-components";
+
+interface AttachmentListProps {
+  attachments: AttachmentDto[];
+  selectedIds: Set<string>;
+  allSelected: boolean;
+  someSelected: boolean;
+  onToggleOne: (id: string) => void;
+  onToggleAll: () => void;
+}
+
+export const AttachmentList: React.FC<AttachmentListProps> = ({
+  attachments,
+  selectedIds,
+  allSelected,
+  someSelected,
+  onToggleOne,
+  onToggleAll,
+}) => (
+  <Table aria-label="Email attachments">
+    <TableHeader>
+      <TableRow>
+        <TableHeaderCell>
+          <Checkbox
+            checked={allSelected ? true : someSelected ? "mixed" : false}
+            onChange={onToggleAll}
+            aria-label="Select all attachments"
+          />
+        </TableHeaderCell>
+        <TableHeaderCell>Name</TableHeaderCell>
+        <TableHeaderCell>Size</TableHeaderCell>
+        {/* etc */}
+      </TableRow>
+    </TableHeader>
+    <TableBody>
+      {attachments.map(att => (
+        <TableRow key={att.id}>
+          <TableCell>
+            <Checkbox
+              checked={selectedIds.has(att.id)}
+              onChange={() => onToggleOne(att.id)}
+              aria-label={`Select ${att.fileName}`}
+            />
+          </TableCell>
+          <TableCell>{att.fileName}</TableCell>
+          {/* … */}
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
+);
