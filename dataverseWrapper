@@ -1,21 +1,36 @@
-// hooks/useEmailAttachments.ts
-import { useQuery } from "@tanstack/react-query";
-import { DataverseClient } from "../dataverse/dataverseClient";
-import { AttachmentDto, getEmailAttachments } from "../dataverse/attachmentsApi";
-
-export function useEmailAttachments(
-  client: DataverseClient,
-  emailId?: string
-) {
-  return useQuery<AttachmentDto[]>({
-    queryKey: ["email-attachments", emailId],
-    queryFn: () => {
-      if (!emailId) return Promise.resolve([]);
-      return getEmailAttachments(client, emailId);
-    },
-    enabled: !!emailId,
-  });
+export interface FileValidationResult {
+  valid: boolean;
+  errors: string[];
+  totalSize: number;
 }
+
+export function validateFiles(
+  files: FileList,
+  maxFileSizeBytes: number,
+  maxTotalSizeBytes: number
+): FileValidationResult {
+  const errors: string[] = [];
+  let totalSize = 0;
+
+  for (const file of Array.from(files)) {
+    totalSize += file.size;
+
+    if (file.size > maxFileSizeBytes) {
+      errors.push(`File "${file.name}" exceeds the maximum size of ${formatFileSize(maxFileSizeBytes)}.`);
+    }
+  }
+
+  if (totalSize > maxTotalSizeBytes) {
+    errors.push(`Total selected files size exceeds the maximum allowed (${formatFileSize(maxTotalSizeBytes)}).`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    totalSize,
+  };
+}
+
 
 
 
