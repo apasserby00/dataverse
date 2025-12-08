@@ -1,0 +1,62 @@
+// dataverse/envApi.ts
+import { DataverseClient } from "./dataverseClient";
+
+/**
+ * Reads a Dataverse Environment Variable by its schema name.
+ * Returns current value if present, otherwise default value, otherwise null.
+ */
+export async function getEnvironmentVariableValue(
+  client: DataverseClient,
+  schemaName: string
+): Promise<string | null> {
+  const query =
+    `?$select=defaultvalue` +
+    `&$filter=schemaname eq '${schemaName}'` +
+    `&$expand=environmentvariabledefinition_environmentvariablevalue($select=value)`;
+
+  const result = await client.retrieveMultipleRecords(
+    "environmentvariabledefinition",
+    query
+  );
+
+  if (!result.entities || result.entities.length === 0) {
+    return null;
+  }
+
+  const def = result.entities[0] as any;
+
+  const currentValue =
+    def.environmentvariabledefinition_environmentvariablevalue?.[0]?.value;
+
+  return currentValue ?? def.defaultvalue ?? null;
+}
+
+
+
+// hooks/useEnvironmentVariables.ts
+import { useQuery } from "@tanstack/react-query";
+import { DataverseClient } from "../dataverse/dataverseClient";
+import { getEnvironmentVariableValue } from "../dataverse/envApi";
+
+type EnvMap = Record<string, string | null>;
+
+export function useEnvironmentVariables(
+  client: DataverseClient,
+  schemaNames: string[]
+) {
+  return useQuery<EnvMap>({
+    queryKey: ["env-vars", ...schemaNames],
+    enabled: schemaNames.length > 0,
+    queryFn: async () => {
+      const entries = await Promise.all(
+        schemaNames.map(async (name) => [
+          name,
+          await getEnvironmentVariableValue(client, name),
+        ] as const)
+      );
+
+      return Object.fromEntries(entries);
+    },
+    staleTime: 1000 * 60 * 10,
+  });
+}
