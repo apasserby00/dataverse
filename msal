@@ -1,112 +1,47 @@
-// AppRoot.tsx
-export const AppRoot = ({ dataverseClient, emailId, linkedCase }) => {
-  // load env vars only if linked case is present
-  const shouldUseGraph = !!linkedCase;
+// useMsalAuth.ts
+import { useMsal, useAccount } from "@azure/msal-react";
 
-  const envQuery = useEnvironmentVariables(
-    dataverseClient,
-    ["new_TenantId", "new_ClientId", "new_GraphScope"],
-    { enabled: shouldUseGraph }  // <- IMPORTANT
-  );
+export function useMsalAuth(scope: string) {
+  const { instance, accounts } = useMsal();
+  const account = useAccount(accounts[0] ?? null);
 
-  const { data: env, isLoading, isError } = envQuery;
-
-  let msalInstance = null;
-  let graphScope = "Files.Read.All";
-
-  if (shouldUseGraph) {
-    if (isLoading) {
-      return <div>Loading SharePoint configuration…</div>;
-    }
-
-    if (isError) {
-      console.error("Failed to load env vars");
-    }
-
-    const tenantId = env?.new_TenantId;
-    const clientId = env?.new_ClientId;
-    graphScope = env?.new_GraphScope ?? "Files.Read.All";
-
-    if (tenantId && clientId) {
-      msalInstance = new PublicClientApplication({
-        auth: {
-          clientId,
-          authority: `https://login.microsoftonline.com/${tenantId}`,
-          redirectUri: window.location.origin,
-        },
-        cache: {
-          cacheLocation: "sessionStorage",
-        },
-      });
-    }
-  }
-
-  return msalInstance ? (
-    <MsalProvider instance={msalInstance}>
-      <QueryClientProvider client={queryClient}>
-        <AppInner
-          dataverseClient={dataverseClient}
-          emailId={emailId}
-          graphScope={graphScope}
-          linkedCase={linkedCase}
-        />
-      </QueryClientProvider>
-    </MsalProvider>
-  ) : (
-    <QueryClientProvider client={queryClient}>
-      <AppInner
-        dataverseClient={dataverseClient}
-        emailId={emailId}
-        graphScope={graphScope}   // default is fine
-        linkedCase={linkedCase}
-        graphDisabled={true}       // <- disables SP button
-      />
-    </QueryClientProvider>
-  );
-};
-
-
-
-
-
-const AppInner = ({
-  dataverseClient,
-  emailId,
-  graphScope,
-  linkedCase,
-  graphDisabled,
-}) => {
-  // Only setup MSAL hooks if Graph is enabled
-  const msal = !graphDisabled
-    ? useMsalAuth(graphScope)
-    : null;
-
-  const isGraphSignedIn = !!msal?.account;
-
-  const handleSelectFromSharePoint = async () => {
-    if (graphDisabled) return; // do nothing
-
-    // If not signed in, prompt
-    if (!msal.account) {
-      await msal.signInForGraph(); 
-    }
-
-    const token = await msal.acquireGraphToken();
-    if (!token) return;
-
-    openSharePointPicker(token, linkedCase);
+  // Explicit login only when user clicks
+  const signInForGraph = async () => {
+    const res = await instance.loginPopup({ scopes: [scope] });
+    return res.account;
   };
 
-  return (
-    <Header
-      onClickSelectFromSharePoint={handleSelectFromSharePoint}
-      sharePointEnabled={!graphDisabled}
-      isGraphSignedIn={isGraphSignedIn}
-      linkedCase={linkedCase}
-      {...otherHeaderProps}
-    />
-  );
-};
+  const acquireGraphToken = async () => {
+    const active = account || instance.getActiveAccount();
+
+    if (!active) {
+      // User not signed in → return null instead of forcing login
+      return null;
+    }
+
+    try {
+      const res = await instance.acquireTokenSilent({
+        account: active,
+        scopes: [scope],
+      });
+      return res.accessToken;
+    } catch {
+      return null;
+    }
+  };
+
+  const logout = () => {
+    instance.logoutPopup();
+  };
+
+  return {
+    account,
+    signInForGraph,
+    acquireGraphToken,
+    logout,
+  };
+}
+
 
 
 
