@@ -1,57 +1,67 @@
 // AppRoot.tsx
-import * as React from "react";
-import { PublicClientApplication } from "@azure/msal-browser";
-import { MsalProvider } from "@azure/msal-react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useEnvironmentVariables } from "./hooks/useEnvironmentVariables";
-import { AppInner } from "./AppInner";
+export const AppRoot = ({ dataverseClient, emailId, linkedCase }) => {
+  // load env vars only if linked case is present
+  const shouldUseGraph = !!linkedCase;
 
-const queryClient = new QueryClient();
+  const envQuery = useEnvironmentVariables(
+    dataverseClient,
+    ["new_TenantId", "new_ClientId", "new_GraphScope"],
+    { enabled: shouldUseGraph }  // <- IMPORTANT
+  );
 
-interface AppRootProps {
-  dataverseClient: DataverseClient;
-  emailId?: string;
-}
+  const { data: env, isLoading, isError } = envQuery;
 
-export const AppRoot: React.FC<AppRootProps> = ({ dataverseClient, emailId }) => {
-  const { data: env, isLoading, isError } = useEnvironmentVariables(dataverseClient, [
-    "new_TenantId",
-    "new_ClientId",
-    "new_GraphScope", // optional
-  ]);
+  let msalInstance = null;
+  let graphScope = "Files.Read.All";
 
-  if (isLoading) return <div>Loading authentication...</div>;
-  if (isError) return <div>Failed to load configuration.</div>;
+  if (shouldUseGraph) {
+    if (isLoading) {
+      return <div>Loading SharePoint configuration…</div>;
+    }
 
-  const tenantId = env?.["new_TenantId"];
-  const clientId = env?.["new_ClientId"];
-  const scope = env?.["new_GraphScope"] ?? "Files.Read.All";
+    if (isError) {
+      console.error("Failed to load env vars");
+    }
 
-  if (!tenantId || !clientId) {
-    return <div>Missing authentication environment variables.</div>;
+    const tenantId = env?.new_TenantId;
+    const clientId = env?.new_ClientId;
+    graphScope = env?.new_GraphScope ?? "Files.Read.All";
+
+    if (tenantId && clientId) {
+      msalInstance = new PublicClientApplication({
+        auth: {
+          clientId,
+          authority: `https://login.microsoftonline.com/${tenantId}`,
+          redirectUri: window.location.origin,
+        },
+        cache: {
+          cacheLocation: "sessionStorage",
+        },
+      });
+    }
   }
 
-  const msalInstance = new PublicClientApplication({
-    auth: {
-      clientId,
-      authority: `https://login.microsoftonline.com/${tenantId}`,
-      redirectUri: window.location.origin, // works for popup
-    },
-    cache: {
-      cacheLocation: "sessionStorage",
-    },
-  });
-
-  return (
+  return msalInstance ? (
     <MsalProvider instance={msalInstance}>
       <QueryClientProvider client={queryClient}>
         <AppInner
           dataverseClient={dataverseClient}
           emailId={emailId}
-          graphScope={scope}
+          graphScope={graphScope}
+          linkedCase={linkedCase}
         />
       </QueryClientProvider>
     </MsalProvider>
+  ) : (
+    <QueryClientProvider client={queryClient}>
+      <AppInner
+        dataverseClient={dataverseClient}
+        emailId={emailId}
+        graphScope={graphScope}   // default is fine
+        linkedCase={linkedCase}
+        graphDisabled={true}       // <- disables SP button
+      />
+    </QueryClientProvider>
   );
 };
 
@@ -59,71 +69,48 @@ export const AppRoot: React.FC<AppRootProps> = ({ dataverseClient, emailId }) =>
 
 
 
+const AppInner = ({
+  dataverseClient,
+  emailId,
+  graphScope,
+  linkedCase,
+  graphDisabled,
+}) => {
+  // Only setup MSAL hooks if Graph is enabled
+  const msal = !graphDisabled
+    ? useMsalAuth(graphScope)
+    : null;
 
+  const isGraphSignedIn = !!msal?.account;
 
+  const handleSelectFromSharePoint = async () => {
+    if (graphDisabled) return; // do nothing
 
+    // If not signed in, prompt
+    if (!msal.account) {
+      await msal.signInForGraph(); 
+    }
 
-import { Configuration, LogLevel } from "@azure/msal-browser";
+    const token = await msal.acquireGraphToken();
+    if (!token) return;
 
-export const msalConfig: Configuration = {
-  auth: {
-    clientId: "<YOUR-SPA-APP-CLIENT-ID>",
-    authority: "https://login.microsoftonline.com/<YOUR-TENANT-ID>",
-    redirectUri: window.location.origin, // usually fine for popup in PCF
-  },
-  cache: {
-    cacheLocation: "sessionStorage", // or "localStorage" if you prefer
-    storeAuthStateInCookie: false,
-  },
-  system: {
-    loggerOptions: {
-      logLevel: LogLevel.Error,
-      loggerCallback: () => {},
-    },
-  },
+    openSharePointPicker(token, linkedCase);
+  };
+
+  return (
+    <Header
+      onClickSelectFromSharePoint={handleSelectFromSharePoint}
+      sharePointEnabled={!graphDisabled}
+      isGraphSignedIn={isGraphSignedIn}
+      linkedCase={linkedCase}
+      {...otherHeaderProps}
+    />
+  );
 };
 
-// Graph scopes you’ll use
-export const graphLoginRequest = {
-  scopes: ["Files.Read.All"], // delegated Graph permission (needs admin consent)
-};
 
 
 
-
-
-
-2
-import { PublicClientApplication } from "@azure/msal-browser";
-import { MsalProvider } from "@azure/msal-react";
-import { msalConfig } from "./auth/msalConfig";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createDataverseClient } from "./dataverse/dataverseClient";
-import { App } from "./App";
-
-const msalInstance = new PublicClientApplication(msalConfig);
-const queryClient = new QueryClient();
-
-export class AttachmentManagerControl implements ComponentFramework.StandardControl<IInputs, IOutputs> {
-  // ...init boilerplate omitted
-
-  public init(context, notifyOutputChanged, state, container): void {
-    const dataverseClient = createDataverseClient(context.webAPI);
-    const emailId = context.parameters.emailId.raw ?? undefined;
-
-    const element = (
-      <MsalProvider instance={msalInstance}>
-        <QueryClientProvider client={queryClient}>
-          <App dataverseClient={dataverseClient} emailId={emailId} />
-        </QueryClientProvider>
-      </MsalProvider>
-    );
-
-    ReactDOM.render(element, container);
-  }
-
-  // ...
-}
 
 
 
