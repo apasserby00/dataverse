@@ -1,161 +1,31 @@
-// useMsalAuth.ts
-import { useMsal, useAccount } from "@azure/msal-react";
-
-export function useMsalAuth(scope: string) {
-  const { instance, accounts } = useMsal();
-  const account = useAccount(accounts[0] ?? null);
-
-  // Explicit login only when user clicks
-  const signInForGraph = async () => {
-    const res = await instance.loginPopup({ scopes: [scope] });
-    return res.account;
-  };
-
-  const acquireGraphToken = async () => {
-    const active = account || instance.getActiveAccount();
-
-    if (!active) {
-      // User not signed in → return null instead of forcing login
-      return null;
-    }
-
-    try {
-      const res = await instance.acquireTokenSilent({
-        account: active,
-        scopes: [scope],
-      });
-      return res.accessToken;
-    } catch {
-      return null;
-    }
-  };
-
-  const logout = () => {
-    instance.logoutPopup();
-  };
-
-  return {
-    account,
-    signInForGraph,
-    acquireGraphToken,
-    logout,
-  };
-}
-
-
-
-
-
-
-
-
-
-
-
-3 auth/useMsalAuth.ts
-
-
-import { useMsal, useAccount } from "@azure/msal-react";
-import { graphLoginRequest } from "./msalConfig";
-
-export function useMsalAuth() {
-  const { instance, accounts } = useMsal();
-  const account = useAccount(accounts[0] ?? null);
-
-  const login = async () => {
-    if (account) return account;
-
-    const res = await instance.loginPopup(graphLoginRequest);
-    return res.account;
-  };
-
-  const acquireGraphToken = async () => {
-    const activeAccount =
-      account || instance.getActiveAccount() || (await login());
-
-    try {
-      const res = await instance.acquireTokenSilent({
-        account: activeAccount!,
-        scopes: graphLoginRequest.scopes,
-      });
-      return res.accessToken;
-    } catch {
-      // fallback to popup if silent fails (new consent, etc.)
-      const res = await instance.acquireTokenPopup(graphLoginRequest);
-      return res.accessToken;
-    }
-  };
-
-  const logout = () => {
-    instance.logoutPopup({
-      account: account ?? instance.getActiveAccount() ?? undefined,
-    });
-  };
-
-  return {
-    account,
-    login,
-    logout,
-    acquireGraphToken,
-  };
-}
-
-
-
-
-
-
-
-
-
-
-
-// hooks/useSharePointFiles.ts
+// hooks/useSharePointSiteId.ts
 import { useQuery } from "@tanstack/react-query";
 import { useMsalAuth } from "../auth/useMsalAuth";
 
-export interface GraphDriveItem {
-  id: string;
-  name: string;
-  webUrl: string;
-  size: number;
-  file?: { mimeType?: string };
-  folder?: { childCount?: number };
-}
+export function useSharePointSiteId(hostname: string, sitePath: string, scope: string) {
+  const { acquireGraphToken } = useMsalAuth(scope);
 
-interface UseSharePointFilesOptions {
-  siteId: string;           // SharePoint site ID (e.g. from admin)
-  folderPath?: string;      // e.g. "Shared Documents/MyFolder"
-}
-
-export function useSharePointFiles({ siteId, folderPath }: UseSharePointFilesOptions) {
-  const { acquireGraphToken } = useMsalAuth();
-
-  return useQuery<GraphDriveItem[]>({
-    queryKey: ["sharepoint-files", siteId, folderPath],
-    enabled: !!siteId,
+  return useQuery({
+    queryKey: ["sharepoint-site-id", hostname, sitePath],
+    enabled: !!hostname && !!sitePath,
     queryFn: async () => {
       const token = await acquireGraphToken();
+      if (!token) throw new Error("Not authenticated to Graph");
 
-      const baseUrl = "https://graph.microsoft.com/v1.0";
-      const path = folderPath
-        ? `/sites/${siteId}/drive/root:/${encodeURI(folderPath)}:/children`
-        : `/sites/${siteId}/drive/root/children`;
+      const url = `https://graph.microsoft.com/v1.0/sites/${hostname}:/${sitePath}?$select=id`;
 
-      const res = await fetch(`${baseUrl}${path}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
       });
 
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`Graph error ${res.status}: ${text}`);
+        throw new Error(`Failed to get site ID (${res.status}): ${text}`);
       }
 
       const json = await res.json();
-      return json.value as GraphDriveItem[];
+      return json.id as string;
     },
+    staleTime: Infinity,
   });
 }
-
