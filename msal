@@ -1,3 +1,68 @@
+// AppRoot.tsx
+import * as React from "react";
+import { PublicClientApplication } from "@azure/msal-browser";
+import { MsalProvider } from "@azure/msal-react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEnvironmentVariables } from "./hooks/useEnvironmentVariables";
+import { AppInner } from "./AppInner";
+
+const queryClient = new QueryClient();
+
+interface AppRootProps {
+  dataverseClient: DataverseClient;
+  emailId?: string;
+}
+
+export const AppRoot: React.FC<AppRootProps> = ({ dataverseClient, emailId }) => {
+  const { data: env, isLoading, isError } = useEnvironmentVariables(dataverseClient, [
+    "new_TenantId",
+    "new_ClientId",
+    "new_GraphScope", // optional
+  ]);
+
+  if (isLoading) return <div>Loading authentication...</div>;
+  if (isError) return <div>Failed to load configuration.</div>;
+
+  const tenantId = env?.["new_TenantId"];
+  const clientId = env?.["new_ClientId"];
+  const scope = env?.["new_GraphScope"] ?? "Files.Read.All";
+
+  if (!tenantId || !clientId) {
+    return <div>Missing authentication environment variables.</div>;
+  }
+
+  const msalInstance = new PublicClientApplication({
+    auth: {
+      clientId,
+      authority: `https://login.microsoftonline.com/${tenantId}`,
+      redirectUri: window.location.origin, // works for popup
+    },
+    cache: {
+      cacheLocation: "sessionStorage",
+    },
+  });
+
+  return (
+    <MsalProvider instance={msalInstance}>
+      <QueryClientProvider client={queryClient}>
+        <AppInner
+          dataverseClient={dataverseClient}
+          emailId={emailId}
+          graphScope={scope}
+        />
+      </QueryClientProvider>
+    </MsalProvider>
+  );
+};
+
+
+
+
+
+
+
+
+
 import { Configuration, LogLevel } from "@azure/msal-browser";
 
 export const msalConfig: Configuration = {
