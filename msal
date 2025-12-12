@@ -1,1 +1,3 @@
-@equals(triggerOutputs()?['body/_regardingobjectid_type'], '')
+_regardingobjectid_value eq @{triggerOutputs()?['body/_regardingobjectid_value']} and activityid ne @{triggerOutputs()?['body/activityid']}
+
+@greater(length(body('List_rows')?['value']), 0)
