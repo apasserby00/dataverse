@@ -5,3 +5,18 @@ switch(
   'z@email.com', 'z1',
   'defaultToken'
 )
+
+
+if(
+  equals(toLower(triggerBody()?['email']), 'x@email.com'),
+  'x1',
+  if(
+    equals(toLower(triggerBody()?['email']), 'y@email.com'),
+    'y1',
+    if(
+      equals(toLower(triggerBody()?['email']), 'z@email.com'),
+      'z1',
+      'defaultToken'
+    )
+  )
+)
