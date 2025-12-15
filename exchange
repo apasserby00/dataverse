@@ -1,0 +1,7 @@
+switch(
+  toLower(triggerBody()?['email']),
+  'x@email.com', 'x1',
+  'y@email.com', 'y1',
+  'z@email.com', 'z1',
+  'defaultToken'
+)
