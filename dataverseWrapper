@@ -1,3 +1,6 @@
+_objectid_value eq @{outputs('Get_a_row_by_ID_-_Email')?['body/activityid']}
+
+
 function getErrorMessage(error: unknown): string {
   if (!error) return "Unknown error";
 
