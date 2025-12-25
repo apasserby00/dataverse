@@ -1,75 +1,40 @@
-// Case → lookup
-private const string CaseLookupField = "CASE_LOOKUP_FIELD";
-
-// Lookup target → code field
-private const string LookupCodeField = "CODE_FIELD";
-
-// Routing rule
-private const string MatchCodeValue = "MATCH_VALUE";
-
-// Queue names
-private const string PrimaryQueueName = "PRIMARY_QUEUE";
-private const string SecondaryQueueName = "SECONDARY_QUEUE";
-
-
-private static Guid ResolveQueueForCase(
+private static void SetEmailRegardingCaseAndRelatedIntake(
     IOrganizationService service,
+    Guid emailId,
     EntityReference caseRef,
-    ITracingService tracing)
+    EntityReference intakeRef)
 {
-    // 1) Retrieve case and get lookup
-    var caseEntity = service.Retrieve(
-        caseRef.LogicalName,
-        caseRef.Id,
-        new ColumnSet(CaseLookupField));
+    var emailUpdate = new Entity("email", emailId);
 
-    var lookupRef = caseEntity.GetAttributeValue<EntityReference>(CaseLookupField);
+    // regarding -> case
+    emailUpdate["regardingobjectid"] = caseRef;
 
-    if (lookupRef == null)
-    {
-        tracing.Trace("ResolveQueueForCase: Case lookup is null. Using secondary queue.");
-        return GetQueueIdByName(service, SecondaryQueueName, tracing);
-    }
+    // related partylist -> intake (overwrite whole list)
+    var ap = new Entity("activityparty");
+    ap["partyid"] = intakeRef;
 
-    // 2) Retrieve lookup target and get code
-    var lookupEntity = service.Retrieve(
-        lookupRef.LogicalName,
-        lookupRef.Id,
-        new ColumnSet(LookupCodeField));
+    var related = new EntityCollection();
+    related.EntityName = "activityparty";
+    related.Entities.Add(ap);
 
-    var code = lookupEntity.GetAttributeValue<string>(LookupCodeField);
+    emailUpdate["related"] = related;
 
-    tracing.Trace("ResolveQueueForCase: Code value = {0}", code ?? "(null)");
-
-    // 3) Routing decision
-    if (string.Equals(code, MatchCodeValue, StringComparison.OrdinalIgnoreCase))
-        return GetQueueIdByName(service, PrimaryQueueName, tracing);
-
-    return GetQueueIdByName(service, SecondaryQueueName, tracing);
+    service.Update(emailUpdate);
 }
 
 
-private static Guid GetQueueIdByName(
+private static void RevertEmailRegardingIntakeAndClearRelated(
     IOrganizationService service,
-    string queueName,
-    ITracingService tracing)
+    Guid emailId,
+    EntityReference intakeRef)
 {
-    var qe = new QueryExpression("queue")
-    {
-        ColumnSet = new ColumnSet("queueid"),
-        TopCount = 1
-    };
+    var emailUpdate = new Entity("email", emailId);
 
-    qe.Criteria.AddCondition("name", ConditionOperator.Equal, queueName);
+    // regarding -> intake
+    emailUpdate["regardingobjectid"] = intakeRef;
 
-    var result = service.RetrieveMultiple(qe);
-    var queue = result.Entities.FirstOrDefault();
+    // clear partylist
+    emailUpdate["related"] = null;
 
-    if (queue == null)
-    {
-        tracing.Trace("GetQueueIdByName: Queue not found: {0}", queueName);
-        return Guid.Empty;
-    }
-
-    return queue.Id;
+    service.Update(emailUpdate);
 }
