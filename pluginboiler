@@ -1,242 +1,75 @@
-using System;
-using System.Linq;
-using Microsoft.Xrm.Sdk;
-using Microsoft.Xrm.Sdk.Query;
+// Case → lookup
+private const string CaseLookupField = "CASE_LOOKUP_FIELD";
 
-public class IntakeCaseLinkLatestEmailPlugin : IPlugin
+// Lookup target → code field
+private const string LookupCodeField = "CODE_FIELD";
+
+// Routing rule
+private const string MatchCodeValue = "MATCH_VALUE";
+
+// Queue names
+private const string PrimaryQueueName = "PRIMARY_QUEUE";
+private const string SecondaryQueueName = "SECONDARY_QUEUE";
+
+
+private static Guid ResolveQueueForCase(
+    IOrganizationService service,
+    EntityReference caseRef,
+    ITracingService tracing)
 {
-    // ====== SET THESE ======
-    private const string IntakeEntity = "new_intake";
-    private const string IntakeCaseField = "new_caseid";     // Intake lookup -> incident
-    private const string EmailIntakeLookup = "new_intakeid"; // Email lookup -> Intake (you added)
-    private const string CaseEntity = "incident";
+    // 1) Retrieve case and get lookup
+    var caseEntity = service.Retrieve(
+        caseRef.LogicalName,
+        caseRef.Id,
+        new ColumnSet(CaseLookupField));
 
-    // Optional: incoming filter
-    private const bool OnlyIncomingEmails = true;
-    // =======================
+    var lookupRef = caseEntity.GetAttributeValue<EntityReference>(CaseLookupField);
 
-    public void Execute(IServiceProvider serviceProvider)
+    if (lookupRef == null)
     {
-        var context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
-        var tracing = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
-        var factory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
-        var service = factory.CreateOrganizationService(context.UserId);
-
-        try
-        {
-            if (context.MessageName != "Update" || context.PrimaryEntityName != IntakeEntity)
-                return;
-
-            if (!context.InputParameters.TryGetValue("Target", out var t) || t is not Entity target)
-                return;
-
-            // avoid loops
-            if (context.Depth > 2)
-                return;
-
-            if (!context.PreEntityImages.Contains("PreImage"))
-                throw new InvalidPluginExecutionException("PreImage required. Include the case lookup field.");
-
-            var pre = context.PreEntityImages["PreImage"];
-            var intakeId = target.Id;
-
-            // only run when the case field is in the update (filtering attributes should also enforce this)
-            if (!target.Attributes.Contains(IntakeCaseField))
-                return;
-
-            var oldCase = pre.GetAttributeValue<EntityReference>(IntakeCaseField);
-            var newCase = target.GetAttributeValue<EntityReference>(IntakeCaseField);
-
-            if (AreEqual(oldCase, newCase))
-                return;
-
-            tracing.Trace($"Intake {intakeId} case changed. Old={(oldCase?.Id.ToString() ?? "null")} New={(newCase?.Id.ToString() ?? "null")}");
-
-            // Find the email to act on:
-            // 1) email where EmailIntakeLookup == intake
-            // 2) fallback: latest email where regarding == intake (first time linking)
-            var email = FindTrackedOrLatestEmail(service, intakeId, tracing);
-            if (email == null)
-            {
-                tracing.Trace("No email found to update. Exiting.");
-                return;
-            }
-
-            var emailId = email.Id;
-
-            if (newCase != null)
-            {
-                // Case A -> Case B (or null -> Case) behaviour:
-                // - update email regarding -> new case
-                // - set EmailIntakeLookup -> intake
-                var emailUpdate = new Entity("email", emailId);
-                emailUpdate["regardingobjectid"] = new EntityReference(CaseEntity, newCase.Id);
-                emailUpdate[EmailIntakeLookup] = new EntityReference(IntakeEntity, intakeId);
-                service.Update(emailUpdate);
-
-                // Queue behaviour:
-                // - delete old queue item(s) for this email
-                DeleteAllQueueItemsForObject(service, emailId, tracing);
-
-                // - create new queue item in derived queue
-                var queueId = ResolveQueueForCase(service, newCase, tracing);
-                if (queueId != Guid.Empty)
-                {
-                    if (!QueueItemExists(service, queueId, emailId))
-                    {
-                        var qi = new Entity("queueitem");
-                        qi["queueid"] = new EntityReference("queue", queueId);
-                        qi["objectid"] = new EntityReference("email", emailId);
-                        service.Create(qi);
-                        tracing.Trace($"Created new queue item for email {emailId} in queue {queueId}.");
-                    }
-                    else
-                    {
-                        tracing.Trace("Queue item already exists for this email+queue. Skipping create.");
-                    }
-                }
-                else
-                {
-                    tracing.Trace("Queue could not be resolved from case. Queue item not created.");
-                }
-            }
-            else
-            {
-                // Case A -> null behaviour:
-                // - revert email regarding -> intake
-                // - clear EmailIntakeLookup
-                var emailUpdate = new Entity("email", emailId);
-                emailUpdate["regardingobjectid"] = new EntityReference(IntakeEntity, intakeId);
-                emailUpdate[EmailIntakeLookup] = null;
-                service.Update(emailUpdate);
-
-                // - delete queue item(s)
-                DeleteAllQueueItemsForObject(service, emailId, tracing);
-            }
-        }
-        catch (Exception ex)
-        {
-            tracing.Trace("Plugin error: " + ex);
-            throw;
-        }
+        tracing.Trace("ResolveQueueForCase: Case lookup is null. Using secondary queue.");
+        return GetQueueIdByName(service, SecondaryQueueName, tracing);
     }
 
-    private static bool AreEqual(EntityReference a, EntityReference b)
+    // 2) Retrieve lookup target and get code
+    var lookupEntity = service.Retrieve(
+        lookupRef.LogicalName,
+        lookupRef.Id,
+        new ColumnSet(LookupCodeField));
+
+    var code = lookupEntity.GetAttributeValue<string>(LookupCodeField);
+
+    tracing.Trace("ResolveQueueForCase: Code value = {0}", code ?? "(null)");
+
+    // 3) Routing decision
+    if (string.Equals(code, MatchCodeValue, StringComparison.OrdinalIgnoreCase))
+        return GetQueueIdByName(service, PrimaryQueueName, tracing);
+
+    return GetQueueIdByName(service, SecondaryQueueName, tracing);
+}
+
+
+private static Guid GetQueueIdByName(
+    IOrganizationService service,
+    string queueName,
+    ITracingService tracing)
+{
+    var qe = new QueryExpression("queue")
     {
-        if (a == null && b == null) return true;
-        if (a == null || b == null) return false;
-        return a.Id == b.Id &&
-               string.Equals(a.LogicalName, b.LogicalName, StringComparison.OrdinalIgnoreCase);
-    }
+        ColumnSet = new ColumnSet("queueid"),
+        TopCount = 1
+    };
 
-    private static Entity FindTrackedOrLatestEmail(IOrganizationService service, Guid intakeId, ITracingService tracing)
+    qe.Criteria.AddCondition("name", ConditionOperator.Equal, queueName);
+
+    var result = service.RetrieveMultiple(qe);
+    var queue = result.Entities.FirstOrDefault();
+
+    if (queue == null)
     {
-        // 1) Prefer the email already “tracked” by the intake lookup
-        var tracked = GetLatestEmailByIntakeLookup(service, intakeId);
-        if (tracked != null)
-        {
-            tracing.Trace($"Found email via intake lookup: {tracked.Id}");
-            return tracked;
-        }
-
-        // 2) Fallback: latest email where regarding == intake (for first-time linking)
-        var fallback = GetLatestEmailByRegardingIntake(service, intakeId);
-        if (fallback != null)
-        {
-            tracing.Trace($"Found email via regarding intake fallback: {fallback.Id}");
-            return fallback;
-        }
-
-        return null;
-    }
-
-    private static Entity GetLatestEmailByIntakeLookup(IOrganizationService service, Guid intakeId)
-    {
-        var qe = new QueryExpression("email")
-        {
-            ColumnSet = new ColumnSet("activityid", "receivedon", "createdon", "directioncode"),
-            TopCount = 1
-        };
-
-        qe.Criteria.AddCondition(EmailIntakeLookup, ConditionOperator.Equal, intakeId);
-
-        if (OnlyIncomingEmails)
-            qe.Criteria.AddCondition("directioncode", ConditionOperator.Equal, false);
-
-        qe.Orders.Add(new OrderExpression("receivedon", OrderType.Descending));
-        qe.Orders.Add(new OrderExpression("createdon", OrderType.Descending));
-
-        var res = service.RetrieveMultiple(qe);
-        return res.Entities.FirstOrDefault();
-    }
-
-    private static Entity GetLatestEmailByRegardingIntake(IOrganizationService service, Guid intakeId)
-    {
-        var qe = new QueryExpression("email")
-        {
-            ColumnSet = new ColumnSet("activityid", "receivedon", "createdon", "directioncode"),
-            TopCount = 1
-        };
-
-        qe.Criteria.AddCondition("regardingobjectid", ConditionOperator.Equal, intakeId);
-
-        if (OnlyIncomingEmails)
-            qe.Criteria.AddCondition("directioncode", ConditionOperator.Equal, false);
-
-        qe.Orders.Add(new OrderExpression("receivedon", OrderType.Descending));
-        qe.Orders.Add(new OrderExpression("createdon", OrderType.Descending));
-
-        var res = service.RetrieveMultiple(qe);
-        return res.Entities.FirstOrDefault();
-    }
-
-    private static void DeleteAllQueueItemsForObject(IOrganizationService service, Guid objectId, ITracingService tracing)
-    {
-        // Retrieves and deletes all queueitems where objectid == this activity (email)
-        // Note: this will remove it from all queues. That matches "delete the old one."
-        var qe = new QueryExpression("queueitem")
-        {
-            ColumnSet = new ColumnSet("queueitemid")
-        };
-        qe.Criteria.AddCondition("objectid", ConditionOperator.Equal, objectId);
-
-        var res = service.RetrieveMultiple(qe);
-        if (res.Entities.Count == 0)
-        {
-            tracing.Trace("No queue items to delete for this email.");
-            return;
-        }
-
-        foreach (var qi in res.Entities)
-        {
-            service.Delete("queueitem", qi.Id);
-        }
-
-        tracing.Trace($"Deleted {res.Entities.Count} queue item(s) for email {objectId}.");
-    }
-
-    private static bool QueueItemExists(IOrganizationService service, Guid queueId, Guid emailId)
-    {
-        var qe = new QueryExpression("queueitem")
-        {
-            ColumnSet = new ColumnSet("queueitemid"),
-            TopCount = 1
-        };
-        qe.Criteria.AddCondition("queueid", ConditionOperator.Equal, queueId);
-        qe.Criteria.AddCondition("objectid", ConditionOperator.Equal, emailId);
-
-        var res = service.RetrieveMultiple(qe);
-        return res.Entities.Count > 0;
-    }
-
-    private static Guid ResolveQueueForCase(IOrganizationService service, EntityReference caseRef, ITracingService tracing)
-    {
-        // TODO: implement your mapping:
-        // - retrieve case fields
-        // - map to a queue id (config table recommended)
-        //
-        // For now return empty to force you to plug in logic.
-        tracing.Trace($"ResolveQueueForCase stub called for case {caseRef.Id}.");
+        tracing.Trace("GetQueueIdByName: Queue not found: {0}", queueName);
         return Guid.Empty;
     }
+
+    return queue.Id;
 }
