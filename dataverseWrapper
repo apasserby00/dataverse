@@ -1,115 +1,96 @@
-export function parseSharePointSiteFromFolderUrl(absoluteFolderUrl: string) {
-  const u = new URL(absoluteFolderUrl);
+import * as React from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseSharePointSiteFromFolderUrl } from "../sharepoint/urlHelpers"; // or your util
+import { getSharePointSiteId, getDrive, getFolderItemIdByPath, listFolderChildren } from "../sharepoint/graphApi";
+import { encodeGraphPath } from "../utils";
 
-  // pathname example:
-  // /sites/DEV-CMS-CORE-2025-100-134/Shared Documents/General/Case Files
-  const parts = u.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+type Drive = { id: string; webUrl: string };
+type DriveItem = {
+  id: string;
+  name: string;
+  webUrl: string;
+  folder?: { childCount: number };
+  file?: { mimeType?: string };
+  size?: number;
+  lastModifiedDateTime?: string;
+};
 
-  if (parts.length < 2) throw new Error(`Unexpected SharePoint URL: ${absoluteFolderUrl}`);
+export function useSharePointBrowser(params: {
+  enabled: boolean;
+  token: string | null;
+  siteUrl: string | null;      // spLocation.siteUrl
+  initialPath?: string;        // default "General"
+}) {
+  const { enabled, token, siteUrl, initialPath = "General" } = params;
+  const [currentPath, setCurrentPath] = React.useState(initialPath);
 
-  const sitePath = `${parts[0]}/${parts[1]}`; // "sites/SITE"
-  return { hostname: u.hostname, sitePath };
-}
+  // Reset currentPath when opening a different site / re-open modal
+  React.useEffect(() => {
+    if (enabled) setCurrentPath(initialPath);
+  }, [enabled, initialPath, siteUrl]);
 
+  // 1) Resolve siteId + drive (cached)
+  const driveQuery = useQuery({
+    queryKey: ["spDrive", siteUrl],
+    enabled: enabled && !!token && !!siteUrl,
+    queryFn: async (): Promise<{ siteId: string; drive: Drive }> => {
+      if (!token || !siteUrl) throw new Error("Missing token/siteUrl");
+      const { hostname, sitePath } = parseSharePointSiteFromFolderUrl(siteUrl);
+      const siteId = await getSharePointSiteId(token, hostname, sitePath);
+      const drive = await getDrive(token, siteId); // {id, webUrl}
+      return { siteId, drive };
+    },
+    staleTime: 5 * 60 * 1000,
+  });
 
-export function getPathRelativeToDriveRoot(driveWebUrl: string, folderAbsoluteUrl: string) {
-  const drive = new URL(driveWebUrl);
-  const folder = new URL(folderAbsoluteUrl);
+  // 2) List children for currentPath
+  const itemsQuery = useQuery({
+    queryKey: ["spFolderChildren", driveQuery.data?.drive.id, currentPath],
+    enabled: enabled && !!token && !!driveQuery.data?.drive.id,
+    queryFn: async (): Promise<DriveItem[]> => {
+      if (!token || !driveQuery.data) throw new Error("Missing token/drive");
+      const driveId = driveQuery.data.drive.id;
 
-  const drivePath = decodeURIComponent(drive.pathname).replace(/\/+$/g, "");
-  const folderPath = decodeURIComponent(folder.pathname);
+      const encoded = encodeGraphPath(currentPath);
+      const folderItemId = await getFolderItemIdByPath(token, driveId, encoded);
+      return await listFolderChildren(token, driveId, folderItemId);
+    },
+    keepPreviousData: true, // smoother navigation
+  });
 
-  // folder must live under the drive root path
-  if (!folderPath.toLowerCase().startsWith(drivePath.toLowerCase() + "/")) {
-    throw new Error(
-      `Folder URL is not under drive root.\nDrive root: ${drivePath}\nFolder: ${folderPath}`
-    );
-  }
+  const openFolder = React.useCallback(
+    (folderName: string) => {
+      setCurrentPath((prev) => (prev ? `${prev}/${folderName}` : folderName));
+    },
+    []
+  );
 
-  // remove "/Shared Documents/" (or whatever the drive root is)
-  return folderPath.slice(drivePath.length + 1); // e.g. "General/Case Files"
-}
+  const goUp = React.useCallback(() => {
+    setCurrentPath((prev) => {
+      const parts = prev.split("/").filter(Boolean);
+      parts.pop();
+      return parts.join("/") || initialPath;
+    });
+  }, [initialPath]);
 
-export function encodeGraphPath(path: string) {
-  return path
-    .split("/")
-    .filter(Boolean)
-    .map(encodeURIComponent)
-    .join("/");
-}
+  const breadcrumbs = React.useMemo(() => {
+    const parts = currentPath.split("/").filter(Boolean);
+    return parts;
+  }, [currentPath]);
 
-
-
-
-
-
-
-import {
-  getSharePointSiteId,
-  getDefaultDriveId,
-  getDrive, // add this (see next section)
-  getFolderItemIdByPath,
-  listFolderChildren,
-  type GraphDriveItem,
-} from "./graphApi";
-
-import {
-  parseSharePointSiteFromFolderUrl,
-  getPathRelativeToDriveRoot,
-  encodeGraphPath,
-} from "../utils";
-
-export async function getCaseFilesFromSharePoint(params: {
-  token: string;
-  absoluteFolderUrl: string;
-}): Promise<GraphDriveItem[]> {
-  const { token, absoluteFolderUrl } = params;
-
-  // 1) Parse hostname + sitePath
-  const siteParsed = parseSharePointSiteFromFolderUrl(absoluteFolderUrl);
-
-  // 2) Get siteId
-  const siteId = await getSharePointSiteId(token, siteParsed.hostname, siteParsed.sitePath);
-
-  // 3) Get the actual drive object (so we have drive.webUrl)
-  const drive = await getDrive(token, siteId); // returns { id, webUrl, ... }
-
-  // 4) Convert folder URL to a drive-relative path (e.g. "General/Case Files")
-  const relativePath = getPathRelativeToDriveRoot(drive.webUrl, absoluteFolderUrl);
-  const encodedPath = encodeGraphPath(relativePath);
-
-  // 5) Resolve folder item and list children
-  const folderItemId = await getFolderItemIdByPath(token, drive.id, encodedPath);
-  return await listFolderChildren(token, drive.id, folderItemId);
-}
-
-
-
-
-
-export async function getDrive(token: string, siteId: string): Promise<{ id: string; webUrl: string }> {
-  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive?$select=id,webUrl`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`Failed to get drive: ${res.status}`);
-  return await res.json();
-}
-
-
-
-
-
-
-
-export async function getFolderItemIdByPath(
-  token: string,
-  driveId: string,
-  encodedPath: string
-): Promise<string> {
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedPath}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`Failed to get folder item: ${res.status}`);
-  const data = await res.json();
-  return data.id;
+  return {
+    currentPath,
+    setCurrentPath,
+    breadcrumbs,
+    drive: driveQuery.data?.drive ?? null,
+    items: itemsQuery.data ?? [],
+    isLoading: driveQuery.isLoading || itemsQuery.isLoading,
+    isFetching: driveQuery.isFetching || itemsQuery.isFetching,
+    error: driveQuery.error ?? itemsQuery.error ?? null,
+    openFolder,
+    goUp,
+    refetch: itemsQuery.refetch,
+  };
 }
 
 
@@ -119,4 +100,13 @@ export async function getFolderItemIdByPath(
 
 
 
+const browser = useSharePointBrowser({
+  enabled: open,
+  token: graphToken,
+  siteUrl: spLocation?.siteUrl ?? null,
+  initialPath: "General",
+});
+
+const folders = browser.items.filter(i => !!i.folder);
+const files = browser.items.filter(i => !!i.file);
 
