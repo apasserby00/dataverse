@@ -1,227 +1,63 @@
-// src/dataverse/sharepointLocationApi.ts
-export interface SharePointSiteExpand {
-  absoluteurl?: string | null;
-}
-
-export interface SharePointDocumentLocation {
-  sharepointdocumentlocationid: string;
-  name?: string | null;
-  absoluteurl?: string | null;
-  relativeurl?: string | null;
-
-  // expanded site (only when parent is sharepointsite)
-  parentsiteorlocation_sharepointsite?: SharePointSiteExpand | null;
-}
-
-export interface CaseSharePointLocationResolved {
-  location: SharePointDocumentLocation;
-  siteUrl: string; // e.g. https://contoso.sharepoint.com/sites/CaseSite
-  libraryName: string; // usually "Shared Documents"
-  folderPathFromLibraryRoot: string; // e.g. "Cases/CASE-000123" or just "CASE-000123"
-  absoluteFolderUrl: string; // siteUrl + / + libraryName + / + folderPath
-}
-
-type DataverseClient = {
-  retrieveMultipleRecords: (
-    entityLogicalName: string,
-    options: string
-  ) => Promise<{ entities: any[] }>;
-};
-
-function normalizeGuid(id: string) {
-  return id.replace(/[{}]/g, "").toLowerCase();
-}
-
-function pickBestLocation(rows: SharePointDocumentLocation[]): SharePointDocumentLocation {
-  // Prefer the one that is the "real" folder: has relativeurl, and/or absoluteurl.
-  return (
-    rows.find((r) => !!r.absoluteurl) ??
-    rows.find((r) => !!r.relativeurl) ??
-    rows[0]
-  );
-}
-
-/**
- * Get the case SharePoint folder location and resolve a usable folder URL/path.
- * Assumes default library "Shared Documents" (most common in D365).
- */
-export async function getCaseSharePointLocationResolved(
-  dataverseClient: DataverseClient,
-  caseId: string,
-  libraryName: string = "Shared Documents"
-): Promise<CaseSharePointLocationResolved | null> {
-  const id = normalizeGuid(caseId);
-
-  const query =
-    `?$select=sharepointdocumentlocationid,name,absoluteurl,relativeurl` +
-    `&$filter=_regardingobjectid_value eq ${id}` +
-    `&$expand=parentsiteorlocation_sharepointsite($select=absoluteurl)`;
-
-  const res = await dataverseClient.retrieveMultipleRecords(
-    "sharepointdocumentlocation",
-    query
-  );
-
-  const rows = (res.entities ?? []) as SharePointDocumentLocation[];
-  if (!rows.length) return null;
-
-  const location = pickBestLocation(rows);
-
-  // If Dataverse gives absolute folder URL, great:
-  if (location.absoluteurl) {
-    // We still want siteUrl + folderPathFromLibraryRoot for Graph calls.
-    // We can derive those from absoluteurl, but simplest: treat as absoluteFolderUrl.
-    // We'll parse it later in the Graph helper.
-    return {
-      location,
-      siteUrl: "", // will be derived by URL parser later
-      libraryName,
-      folderPathFromLibraryRoot: "", // derived later
-      absoluteFolderUrl: location.absoluteurl,
-    };
-  }
-
-  const siteUrl = location.parentsiteorlocation_sharepointsite?.absoluteurl?.trim();
-  const relative = location.relativeurl?.trim();
-
-  if (!siteUrl || !relative) return null;
-
-  // NOTE: relativeurl might already include subfolders like "Cases/CASE-000123"
-  const folderPathFromLibraryRoot = relative.replace(/^\/+|\/+$/g, "");
-  const absoluteFolderUrl = `${siteUrl.replace(/\/+$/g, "")}/${libraryName}/${folderPathFromLibraryRoot}`;
-
-  return {
-    location,
-    siteUrl,
-    libraryName,
-    folderPathFromLibraryRoot,
-    absoluteFolderUrl,
-  };
-}
-
-
-
-
-
-// src/sharepoint/urlHelpers.ts
-export interface ParsedCaseFolderUrl {
-  hostname: string;           // tenant.sharepoint.com
-  sitePath: string;           // sites/CaseSite
-  libraryName: string;        // Shared Documents
-  folderFromLibraryRoot: string; // Cases/CASE-000123
-}
-
-/**
- * Parse a SharePoint folder URL of the form:
- * https://{host}/{sitePath}/{libraryName}/{folder...}
- */
-export function parseCaseFolderUrl(absoluteFolderUrl: string): ParsedCaseFolderUrl {
+export function parseSharePointSiteFromFolderUrl(absoluteFolderUrl: string) {
   const u = new URL(absoluteFolderUrl);
 
-  const hostname = u.hostname;
-
   // pathname example:
-  // /sites/CaseSite/Shared%20Documents/Cases/CASE-000123
+  // /sites/DEV-CMS-CORE-2025-100-134/Shared Documents/General/Case Files
   const parts = u.pathname.split("/").filter(Boolean).map(decodeURIComponent);
 
-  if (parts.length < 3) {
-    throw new Error(`Unexpected SharePoint folder URL: ${absoluteFolderUrl}`);
+  if (parts.length < 2) throw new Error(`Unexpected SharePoint URL: ${absoluteFolderUrl}`);
+
+  const sitePath = `${parts[0]}/${parts[1]}`; // "sites/SITE"
+  return { hostname: u.hostname, sitePath };
+}
+
+
+export function getPathRelativeToDriveRoot(driveWebUrl: string, folderAbsoluteUrl: string) {
+  const drive = new URL(driveWebUrl);
+  const folder = new URL(folderAbsoluteUrl);
+
+  const drivePath = decodeURIComponent(drive.pathname).replace(/\/+$/g, "");
+  const folderPath = decodeURIComponent(folder.pathname);
+
+  // folder must live under the drive root path
+  if (!folderPath.toLowerCase().startsWith(drivePath.toLowerCase() + "/")) {
+    throw new Error(
+      `Folder URL is not under drive root.\nDrive root: ${drivePath}\nFolder: ${folderPath}`
+    );
   }
 
-  // sitePath is typically first 2 segments: sites + SiteName
-  // It can also be: teams + TeamName, or something else in some tenants.
-  // For Dynamics, it's usually /sites/{x} or /teams/{x}
-  const sitePath = `${parts[0]}/${parts[1]}`;
-  const libraryName = parts[2];
-
-  const folderFromLibraryRoot = parts.slice(3).join("/"); // rest
-  return { hostname, sitePath, libraryName, folderFromLibraryRoot };
+  // remove "/Shared Documents/" (or whatever the drive root is)
+  return folderPath.slice(drivePath.length + 1); // e.g. "General/Case Files"
 }
 
-
-
-
-// src/sharepoint/graphApi.ts
-export interface GraphDriveItem {
-  id: string;
-  name: string;
-  webUrl: string;
-  size?: number;
-  lastModifiedDateTime?: string;
-  folder?: { childCount: number };
-  file?: { mimeType?: string };
-}
-
-async function graph/frontendFetch<T>(token: string, url: string): Promise<T> {
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Graph ${res.status} ${res.statusText}: ${text}`);
-  }
-  return (await res.json()) as T;
-}
-
-export async function getSharePointSiteId(
-  token: string,
-  hostname: string,
-  sitePath: string
-): Promise<string> {
-  // Graph: /sites/{hostname}:/{sitePath}
-  const url = `https://graph.microsoft.com/v1.0/sites/${hostname}:/${sitePath}`;
-  const data = await graph/frontendFetch<{ id: string }>(token, url);
-  return data.id;
-}
-
-export async function getDefaultDriveId(token: string, siteId: string): Promise<string> {
-  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive`;
-  const data = await graph/frontendFetch<{ id: string }>(token, url);
-  return data.id;
-}
-
-export async function getFolderItemIdByPath(
-  token: string,
-  driveId: string,
-  folderFromLibraryRoot: string
-): Promise<string> {
-  // Encode path safely; keep slashes.
-  const encoded = folderFromLibraryRoot
+export function encodeGraphPath(path: string) {
+  return path
     .split("/")
-    .map((seg) => encodeURIComponent(seg))
+    .filter(Boolean)
+    .map(encodeURIComponent)
     .join("/");
-
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encoded}`;
-  const data = await graph/frontendFetch<{ id: string }>(token, url);
-  return data.id;
-}
-
-export async function listFolderChildren(
-  token: string,
-  driveId: string,
-  folderItemId: string
-): Promise<GraphDriveItem[]> {
-  const url =
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${folderItemId}/children` +
-    `?$top=200&$select=id,name,webUrl,size,lastModifiedDateTime,file,folder`;
-
-  const data = await graph/frontendFetch<{ value: GraphDriveItem[] }>(token, url);
-  return data.value ?? [];
 }
 
 
 
 
 
-// src/sharepoint/getCaseFiles.ts
-import { parseCaseFolderUrl } from "./urlHelpers";
+
+
 import {
   getSharePointSiteId,
   getDefaultDriveId,
+  getDrive, // add this (see next section)
   getFolderItemIdByPath,
   listFolderChildren,
   type GraphDriveItem,
 } from "./graphApi";
+
+import {
+  parseSharePointSiteFromFolderUrl,
+  getPathRelativeToDriveRoot,
+  encodeGraphPath,
+} from "../utils";
 
 export async function getCaseFilesFromSharePoint(params: {
   token: string;
@@ -229,20 +65,33 @@ export async function getCaseFilesFromSharePoint(params: {
 }): Promise<GraphDriveItem[]> {
   const { token, absoluteFolderUrl } = params;
 
-  const parsed = parseCaseFolderUrl(absoluteFolderUrl);
+  // 1) Parse hostname + sitePath
+  const siteParsed = parseSharePointSiteFromFolderUrl(absoluteFolderUrl);
 
-  const siteId = await getSharePointSiteId(token, parsed.hostname, parsed.sitePath);
-  const driveId = await getDefaultDriveId(token, siteId);
+  // 2) Get siteId
+  const siteId = await getSharePointSiteId(token, siteParsed.hostname, siteParsed.sitePath);
 
-  // IMPORTANT: parsed.folderFromLibraryRoot is already relative to library root
-  // because urlHelpers strips library segment out.
-  const folderItemId = await getFolderItemIdByPath(
-    token,
-    driveId,
-    parsed.folderFromLibraryRoot
-  );
+  // 3) Get the actual drive object (so we have drive.webUrl)
+  const drive = await getDrive(token, siteId); // returns { id, webUrl, ... }
 
-  return await listFolderChildren(token, driveId, folderItemId);
+  // 4) Convert folder URL to a drive-relative path (e.g. "General/Case Files")
+  const relativePath = getPathRelativeToDriveRoot(drive.webUrl, absoluteFolderUrl);
+  const encodedPath = encodeGraphPath(relativePath);
+
+  // 5) Resolve folder item and list children
+  const folderItemId = await getFolderItemIdByPath(token, drive.id, encodedPath);
+  return await listFolderChildren(token, drive.id, folderItemId);
+}
+
+
+
+
+
+export async function getDrive(token: string, siteId: string): Promise<{ id: string; webUrl: string }> {
+  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive?$select=id,webUrl`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`Failed to get drive: ${res.status}`);
+  return await res.json();
 }
 
 
@@ -250,43 +99,17 @@ export async function getCaseFilesFromSharePoint(params: {
 
 
 
-import { useQuery } from "@tanstack/react-query";
-import { getCaseSharePointLocationResolved } from "../dataverse/sharepointLocationApi";
 
-export function useCaseSharePointLocation(dataverseClient: any, caseId?: string | null) {
-  return useQuery({
-    queryKey: ["case-sp-location", caseId],
-    enabled: !!caseId,
-    queryFn: async () => {
-      if (!caseId) return null;
-      return await getCaseSharePointLocationResolved(dataverseClient, caseId);
-    },
-  });
-}
-
-
-
-
-
-
-
-
-import { useQuery } from "@tanstack/react-query";
-import { getCaseFilesFromSharePoint } from "../sharepoint/getCaseFiles";
-
-export function useSharePointFiles(
-  token: string | null,
-  absoluteFolderUrl: string | null,
-  enabled: boolean
-) {
-  return useQuery({
-    queryKey: ["sp-files", absoluteFolderUrl],
-    enabled: enabled && !!token && !!absoluteFolderUrl,
-    queryFn: async () => {
-      if (!token || !absoluteFolderUrl) return [];
-      return await getCaseFilesFromSharePoint({ token, absoluteFolderUrl });
-    },
-  });
+export async function getFolderItemIdByPath(
+  token: string,
+  driveId: string,
+  encodedPath: string
+): Promise<string> {
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedPath}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`Failed to get folder item: ${res.status}`);
+  const data = await res.json();
+  return data.id;
 }
 
 
@@ -296,24 +119,4 @@ export function useSharePointFiles(
 
 
 
-
-const { data: spLoc } = useCaseSharePointLocation(dataverseClient, regardingCase);
-
-const handleSelectFromSharePoint = async () => {
-  if (!hasCase || !msal) return;
-
-  if (!msal.account) await msal.signInForGraph();
-
-  const token = await msal.acquireGraphToken();
-  if (!token) return;
-
-  const absoluteFolderUrl = spLoc?.absoluteFolderUrl ?? spLoc?.location?.absoluteurl ?? null;
-  if (!absoluteFolderUrl) {
-    // toast: no folder found
-    return;
-  }
-
-  const files = await getCaseFilesFromSharePoint({ token, absoluteFolderUrl });
-  openSharePointPicker(files, regardingCase);
-};
 
