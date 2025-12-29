@@ -1,168 +1,132 @@
-_objectid_value eq @{outputs('Get_a_row_by_ID_-_Email')?['body/activityid']}
-
-
-function getErrorMessage(error: unknown): string {
-  if (!error) return "Unknown error";
-
-  if (error instanceof Error) return error.message;
-
-  const e = error as any;
-  if (e.body?.error?.message) return e.body.error.message;
-  if (e.message) return e.message;
-  if (e.errorMessage) return e.errorMessage;
-
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "An unexpected error occurred.";
-  }
+// src/dataverse/sharepointLocationApi.ts
+export interface SharePointDocumentLocation {
+  sharepointdocumentlocationid: string;
+  name?: string;
+  absoluteurl?: string | null;      // sometimes populated
+  relativeurl?: string | null;      // often populated
+  // lookup fields (raw OData)
+  _regardingobjectid_value?: string | null;
+  _parentsiteorlocation_value?: string | null;
 }
 
-
-
-
-
-
-// hooks/useUploadEmailAttachments.ts
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { DataverseClient } from "../dataverse/dataverseClient";
-import { uploadEmailAttachments } from "../dataverse/attachmentsApi";
-
-export function useUploadEmailAttachments(
-  client: DataverseClient,
-  emailId?: string
-) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (files: FileList) => {
-      if (!emailId) throw new Error("Email Id is not set.");
-      await uploadEmailAttachments(client, emailId, files);
-    },
-    onSuccess: () => {
-      if (emailId) {
-        queryClient.invalidateQueries({
-          queryKey: ["email-attachments", emailId],
-        });
-      }
-    },
-    retry: false,
-  });
+export interface SharePointLocationResult {
+  location: SharePointDocumentLocation;
+  // A best-effort absolute URL if Dataverse doesn’t give absoluteurl
+  absoluteUrl?: string | null;
+  // A best-effort folder path relative to library (often "Cases/CASE-000123")
+  folderPath?: string | null;
 }
 
-
-
-
-
-// hooks/useDeleteAttachment.ts
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { DataverseClient } from "../dataverse/dataverseClient";
-import { deleteAttachment } from "../dataverse/attachmentsApi";
-
-export function useDeleteAttachment(
-  client: DataverseClient,
-  emailId?: string
-) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (attachmentId: string) => deleteAttachment(client, attachmentId),
-    onSuccess: () => {
-      if (emailId) {
-        queryClient.invalidateQueries({
-          queryKey: ["email-attachments", emailId],
-        });
-      }
-    },
-  });
-}
-
-
-
-
-// hooks/useDownloadAttachment.ts
-import { useMutation } from "@tanstack/react-query";
-import { DataverseClient } from "../dataverse/dataverseClient";
-import { downloadAttachment } from "../dataverse/attachmentsApi";
-
-export function useDownloadAttachment(client: DataverseClient) {
-  return useMutation({
-    mutationFn: (attachmentId: string) => downloadAttachment(client, attachmentId),
-    retry: false,
-  });
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import * as React from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { DataverseClient } from "./dataverse/dataverseClient";
-import { useEmailAttachments } from "./hooks/useEmailAttachments";
-import { useUploadEmailAttachments } from "./hooks/useUploadEmailAttachments";
-import { useDeleteAttachment } from "./hooks/useDeleteAttachment";
-import { useDownloadAttachment } from "./hooks/useDownloadAttachment";
-import { Header } from "./Header";
-
-const queryClient = new QueryClient();
-
-interface AppProps {
-  dataverseClient: DataverseClient;
-  emailId?: string;
-}
-
-export const App: React.FC<AppProps> = ({ dataverseClient, emailId }) => {
-  const { data: attachments, isLoading } = useEmailAttachments(dataverseClient, emailId);
-  const uploadMutation = useUploadEmailAttachments(dataverseClient, emailId);
-  const deleteMutation = useDeleteAttachment(dataverseClient, emailId);
-  const downloadMutation = useDownloadAttachment(dataverseClient);
-
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-
-  return (
-    <QueryClientProvider client={queryClient}>
-      <Header
-        isUploading={uploadMutation.isPending}
-        onClickUpload={() => fileInputRef.current?.click()}
-      />
-
-      <input
-        type="file"
-        multiple
-        ref={fileInputRef}
-        style={{ display: "none" }}
-        onChange={(e) => {
-          if (e.target.files) {
-            uploadMutation.mutate(e.target.files);
-            e.target.value = "";
-          }
-        }}
-      />
-
-      {/* attachments list */}
-      {!isLoading && attachments && (
-        <ul>
-          {attachments.map((att) => (
-            <li key={att.id}>
-              {att.fileName}{" "}
-              <button onClick={() => downloadMutation.mutate(att.id)}>Download</button>
-              <button onClick={() => deleteMutation.mutate(att.id)}>Delete</button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </QueryClientProvider>
-  );
+type DataverseClient = {
+  retrieveMultiple: (
+    entitySetName: string,
+    query: string
+  ) => Promise<{ entities: any[] }>;
 };
 
+function normalizeGuid(id: string) {
+  return id.replace(/[{}]/g, "").toLowerCase();
+}
+
+/**
+ * Tries to find a SharePointDocumentLocation that represents the case folder.
+ *
+ * Notes:
+ * - For case, the regardingobject is the incident (case) record.
+ * - In many setups you’ll have multiple locations; we pick the “deepest” one
+ *   (usually the actual case folder, not the site root).
+ */
+export async function getCaseSharePointDocumentLocation(
+  dataverseClient: DataverseClient,
+  caseId: string
+): Promise<SharePointLocationResult | null> {
+  const id = normalizeGuid(caseId);
+
+  // We’ll query locations for the case and pick the one that looks like the folder.
+  // Order by createdon desc is a decent heuristic; alternatively pick the one with relativeurl populated.
+  const query =
+    `?$select=sharepointdocumentlocationid,name,absoluteurl,relativeurl,createdon,_parentsiteorlocation_value,_regardingobjectid_value` +
+    `&$filter=_regardingobjectid_value eq ${id}` +
+    `&$orderby=createdon desc`;
+
+  const res = await dataverseClient.retrieveMultiple(
+    "sharepointdocumentlocations",
+    query
+  );
+
+  const rows = (res.entities ?? []) as SharePointDocumentLocation[];
+  if (!rows.length) return null;
+
+  // Heuristic: prefer a row with relativeurl (folder name) and/or absoluteurl.
+  const best =
+    rows.find((r) => !!r.absoluteurl) ??
+    rows.find((r) => !!r.relativeurl) ??
+    rows[0];
+
+  // If absoluteurl is provided, that's simplest.
+  if (best.absoluteurl) {
+    return {
+      location: best,
+      absoluteUrl: best.absoluteurl,
+      folderPath: null, // can derive later
+    };
+  }
+
+  // If no absoluteurl, we still return the location row.
+  // You can later resolve parent chain if needed (advanced scenario).
+  return {
+    location: best,
+    absoluteUrl: null,
+    folderPath: best.relativeurl ?? null,
+  };
+}
+
+
+
+
+
+// src/hooks/useCaseSharePointLocation.ts
+import { useQuery } from "@tanstack/react-query";
+import { getCaseSharePointDocumentLocation } from "../dataverse/sharepointLocationApi";
+
+type DataverseClient = {
+  retrieveMultiple: (entitySetName: string, query: string) => Promise<{ entities: any[] }>;
+};
+
+export function useCaseSharePointLocation(
+  dataverseClient: DataverseClient,
+  linkedCase?: string | null
+) {
+  return useQuery({
+    queryKey: ["caseSharePointLocation", linkedCase],
+    enabled: !!linkedCase,
+    queryFn: async () => {
+      if (!linkedCase) return null;
+      return await getCaseSharePointDocumentLocation(dataverseClient, linkedCase);
+    },
+  });
+}
+
+
+
+
+
+const { data: spLoc } = useCaseSharePointLocation(dataverseClient, linkedCase);
+
+const handleSelectFromSharePoint = async () => {
+  if (!linkedCase || !msal) return;
+
+  if (!msal.account) await msal.signInForGraph();
+
+  const token = await msal.acquireGraphToken();
+  if (!token) return;
+
+  if (!spLoc) {
+    // toast: "No SharePoint folder found for this case"
+    return;
+  }
+
+  // If you have absoluteUrl you can go straight to Graph lookup (siteId/driveId/folder listing)
+  // If you only have relativeurl, you need to resolve parent chain (next section)
+  console.log("Case SP location:", spLoc);
+};
