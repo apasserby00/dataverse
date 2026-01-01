@@ -1,112 +1,27 @@
-import * as React from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { parseSharePointSiteFromFolderUrl } from "../sharepoint/urlHelpers"; // or your util
-import { getSharePointSiteId, getDrive, getFolderItemIdByPath, listFolderChildren } from "../sharepoint/graphApi";
-import { encodeGraphPath } from "../utils";
-
-type Drive = { id: string; webUrl: string };
-type DriveItem = {
-  id: string;
-  name: string;
-  webUrl: string;
-  folder?: { childCount: number };
-  file?: { mimeType?: string };
-  size?: number;
-  lastModifiedDateTime?: string;
-};
-
-export function useSharePointBrowser(params: {
-  enabled: boolean;
-  token: string | null;
-  siteUrl: string | null;      // spLocation.siteUrl
-  initialPath?: string;        // default "General"
-}) {
-  const { enabled, token, siteUrl, initialPath = "General" } = params;
-  const [currentPath, setCurrentPath] = React.useState(initialPath);
-
-  // Reset currentPath when opening a different site / re-open modal
-  React.useEffect(() => {
-    if (enabled) setCurrentPath(initialPath);
-  }, [enabled, initialPath, siteUrl]);
-
-  // 1) Resolve siteId + drive (cached)
-  const driveQuery = useQuery({
-    queryKey: ["spDrive", siteUrl],
-    enabled: enabled && !!token && !!siteUrl,
-    queryFn: async (): Promise<{ siteId: string; drive: Drive }> => {
-      if (!token || !siteUrl) throw new Error("Missing token/siteUrl");
-      const { hostname, sitePath } = parseSharePointSiteFromFolderUrl(siteUrl);
-      const siteId = await getSharePointSiteId(token, hostname, sitePath);
-      const drive = await getDrive(token, siteId); // {id, webUrl}
-      return { siteId, drive };
-    },
-    staleTime: 5 * 60 * 1000,
-  });
-
-  // 2) List children for currentPath
-  const itemsQuery = useQuery({
-    queryKey: ["spFolderChildren", driveQuery.data?.drive.id, currentPath],
-    enabled: enabled && !!token && !!driveQuery.data?.drive.id,
-    queryFn: async (): Promise<DriveItem[]> => {
-      if (!token || !driveQuery.data) throw new Error("Missing token/drive");
-      const driveId = driveQuery.data.drive.id;
-
-      const encoded = encodeGraphPath(currentPath);
-      const folderItemId = await getFolderItemIdByPath(token, driveId, encoded);
-      return await listFolderChildren(token, driveId, folderItemId);
-    },
-    keepPreviousData: true, // smoother navigation
-  });
-
-  const openFolder = React.useCallback(
-    (folderName: string) => {
-      setCurrentPath((prev) => (prev ? `${prev}/${folderName}` : folderName));
-    },
-    []
-  );
-
-  const goUp = React.useCallback(() => {
-    setCurrentPath((prev) => {
-      const parts = prev.split("/").filter(Boolean);
-      parts.pop();
-      return parts.join("/") || initialPath;
-    });
-  }, [initialPath]);
-
-  const breadcrumbs = React.useMemo(() => {
-    const parts = currentPath.split("/").filter(Boolean);
-    return parts;
-  }, [currentPath]);
-
-  return {
-    currentPath,
-    setCurrentPath,
-    breadcrumbs,
-    drive: driveQuery.data?.drive ?? null,
-    items: itemsQuery.data ?? [],
-    isLoading: driveQuery.isLoading || itemsQuery.isLoading,
-    isFetching: driveQuery.isFetching || itemsQuery.isFetching,
-    error: driveQuery.error ?? itemsQuery.error ?? null,
-    openFolder,
-    goUp,
-    refetch: itemsQuery.refetch,
-  };
+function blobToFile(blob: Blob, fileName: string, mimeType?: string): File {
+  return new File([blob], fileName, { type: mimeType ?? blob.type ?? "application/octet-stream" });
 }
 
 
+function filesToFileList(files: File[]): FileList {
+  const dt = new DataTransfer();
+  files.forEach((f) => dt.items.add(f));
+  return dt.files;
+}
 
+const handleUploadSelectedFromSharePoint = async () => {
+  if (!token || !spLocation) return;
 
+  // selectedDriveItems: the files user checked in the dialog
+  const blobs = await Promise.all(
+    selectedDriveItems.map(async (item) => {
+      const blob = await downloadViaDownloadUrl({ token, driveId, itemId: item.id }); // you already have this working
+      const file = blobToFile(blob, item.name, item.file?.mimeType);
+      return file;
+    })
+  );
 
+  const fileList = filesToFileList(blobs);
 
-
-
-const browser = useSharePointBrowser({
-  enabled: open,
-  token: graphToken,
-  siteUrl: spLocation?.siteUrl ?? null,
-  initialPath: "General",
-});
-
-const folders = browser.items.filter(i => !!i.folder);
-const files = browser.items.filter(i => !!i.file);
-
+  await uploadMutation.mutateAsync({ emailId, files: fileList }); // or however your hook signature is
+};
