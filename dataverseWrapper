@@ -1,12 +1,10 @@
-await Promise.allSettled(
-  Array.from(files).map(uploadSingle)
-);
-
-
-
-const uploadSingle = (file: File) =>
-  new Promise<{ file: File; status: "success" | "error"; error?: unknown }>(
-    (resolve) => {
+export async function uploadEmailAttachments(
+  client: DataverseClient,
+  emailId: string,
+  files: FileList
+): Promise<UploadResult[]> {
+  const uploadSingle = (file: File): Promise<UploadResult> =>
+    new Promise((resolve) => {
       const reader = new FileReader();
 
       reader.onload = async () => {
@@ -33,40 +31,20 @@ const uploadSingle = (file: File) =>
         resolve({ file, status: "error", error: e });
 
       reader.readAsDataURL(file);
-    }
+    });
+
+  const settled = await Promise.allSettled(
+    Array.from(files).map(uploadSingle)
   );
 
-
-
-const results = await Promise.allSettled(
-  Array.from(files).map(uploadSingle)
-);
-
-return results;
-
-
-
-
-
-
-onSuccess: (results) => {
-  const successes = results.filter(
-    (r) => r.status === "fulfilled" && r.value.status === "success"
+  // unwrap PromiseSettledResult → UploadResult
+  return settled.map((r) =>
+    r.status === "fulfilled"
+      ? r.value
+      : {
+          file: new File([], "unknown"),
+          status: "error",
+          error: r.reason,
+        }
   );
-
-  const failures = results.filter(
-    (r) => r.status === "fulfilled" && r.value.status === "error"
-  );
-
-  if (successes.length) {
-    toast.success(`${successes.length} attachments uploaded`);
-  }
-
-  if (failures.length) {
-    toast.warning(`${failures.length} attachments failed`);
-  }
-
-  queryClient.invalidateQueries({
-    queryKey: ["email-attachments", emailId],
-  });
-};
+}
