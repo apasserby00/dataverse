@@ -1,50 +1,16 @@
-export async function uploadEmailAttachments(
-  client: DataverseClient,
-  emailId: string,
-  files: FileList
-): Promise<UploadResult[]> {
-  const uploadSingle = (file: File): Promise<UploadResult> =>
-    new Promise((resolve) => {
-      const reader = new FileReader();
+onSuccess: (results) => {
+  const successCount = results.filter(r => r.status === "success").length;
+  const failCount = results.filter(r => r.status === "error").length;
 
-      reader.onload = async () => {
-        try {
-          const base64 = (reader.result as string).split(",")[1];
+  if (successCount) {
+    toast.success(`${successCount} attachment(s) uploaded`);
+  }
 
-          const record = {
-            "objectid_email@odata.bind": `/emails(${emailId})`,
-            objecttypecode: "email",
-            body: base64,
-            mimetype: file.type || "application/octet-stream",
-            filename: file.name,
-          };
+  if (failCount) {
+    toast.warning(`${failCount} attachment(s) failed`);
+  }
 
-          await client.createRecord("activitymimeattachment", record);
-
-          resolve({ file, status: "success" });
-        } catch (err) {
-          resolve({ file, status: "error", error: err });
-        }
-      };
-
-      reader.onerror = (e) =>
-        resolve({ file, status: "error", error: e });
-
-      reader.readAsDataURL(file);
-    });
-
-  const settled = await Promise.allSettled(
-    Array.from(files).map(uploadSingle)
-  );
-
-  // unwrap PromiseSettledResult → UploadResult
-  return settled.map((r) =>
-    r.status === "fulfilled"
-      ? r.value
-      : {
-          file: new File([], "unknown"),
-          status: "error",
-          error: r.reason,
-        }
-  );
-}
+  queryClient.invalidateQueries({
+    queryKey: ["email-attachments", emailId],
+  });
+};
