@@ -1,27 +1,72 @@
-function blobToFile(blob: Blob, fileName: string, mimeType?: string): File {
-  return new File([blob], fileName, { type: mimeType ?? blob.type ?? "application/octet-stream" });
-}
+await Promise.allSettled(
+  Array.from(files).map(uploadSingle)
+);
 
 
-function filesToFileList(files: File[]): FileList {
-  const dt = new DataTransfer();
-  files.forEach((f) => dt.items.add(f));
-  return dt.files;
-}
 
-const handleUploadSelectedFromSharePoint = async () => {
-  if (!token || !spLocation) return;
+const uploadSingle = (file: File) =>
+  new Promise<{ file: File; status: "success" | "error"; error?: unknown }>(
+    (resolve) => {
+      const reader = new FileReader();
 
-  // selectedDriveItems: the files user checked in the dialog
-  const blobs = await Promise.all(
-    selectedDriveItems.map(async (item) => {
-      const blob = await downloadViaDownloadUrl({ token, driveId, itemId: item.id }); // you already have this working
-      const file = blobToFile(blob, item.name, item.file?.mimeType);
-      return file;
-    })
+      reader.onload = async () => {
+        try {
+          const base64 = (reader.result as string).split(",")[1];
+
+          const record = {
+            "objectid_email@odata.bind": `/emails(${emailId})`,
+            objecttypecode: "email",
+            body: base64,
+            mimetype: file.type || "application/octet-stream",
+            filename: file.name,
+          };
+
+          await client.createRecord("activitymimeattachment", record);
+
+          resolve({ file, status: "success" });
+        } catch (err) {
+          resolve({ file, status: "error", error: err });
+        }
+      };
+
+      reader.onerror = (e) =>
+        resolve({ file, status: "error", error: e });
+
+      reader.readAsDataURL(file);
+    }
   );
 
-  const fileList = filesToFileList(blobs);
 
-  await uploadMutation.mutateAsync({ emailId, files: fileList }); // or however your hook signature is
+
+const results = await Promise.allSettled(
+  Array.from(files).map(uploadSingle)
+);
+
+return results;
+
+
+
+
+
+
+onSuccess: (results) => {
+  const successes = results.filter(
+    (r) => r.status === "fulfilled" && r.value.status === "success"
+  );
+
+  const failures = results.filter(
+    (r) => r.status === "fulfilled" && r.value.status === "error"
+  );
+
+  if (successes.length) {
+    toast.success(`${successes.length} attachments uploaded`);
+  }
+
+  if (failures.length) {
+    toast.warning(`${failures.length} attachments failed`);
+  }
+
+  queryClient.invalidateQueries({
+    queryKey: ["email-attachments", emailId],
+  });
 };
