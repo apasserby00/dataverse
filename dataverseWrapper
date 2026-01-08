@@ -1,45 +1,18 @@
-export function getErrorMessage(error: unknown): string {
-  if (!error) return "Unknown error";
+async function getCaseTitle(caseId: string): Promise<string | null> {
+  if (!caseId) return null;
 
-  const e: any = error;
+  // remove braces if present
+  const id = caseId.replace(/[{}]/g, "");
 
-  // 1) GraphError style (Graph SDK often puts the payload here)
-  const graphBodyMsg =
-    e?.body?.error?.message ??
-    e?.error?.message ??
-    e?.responseBody?.error?.message;
+  const result = await Xrm.WebApi.retrieveRecord(
+    "incident",
+    id,
+    "?$select=title"
+  );
 
-  if (graphBodyMsg) return graphBodyMsg;
-
-  // 2) If it's an Error, try to extract JSON from its message
-  if (error instanceof Error) {
-    const msg = error.message ?? "";
-
-    // Try to find JSON after "Graph XXX:" or any prefix
-    const idx = msg.indexOf("{");
-    if (idx !== -1) {
-      const maybeJson = msg.slice(idx);
-      try {
-        const parsed = JSON.parse(maybeJson);
-        const parsedMsg = parsed?.error?.message;
-        if (parsedMsg) return parsedMsg;
-      } catch {
-        // ignore parse error, fall through
-      }
-    }
-
-    // Fallback to the raw message
-    return msg || "An unexpected error occurred.";
-  }
-
-  // 3) Common fallbacks
-  if (typeof e?.message === "string") return e.message;
-  if (typeof e?.errorMessage === "string") return e.errorMessage;
-
-  // 4) Last resort
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "An unexpected error occurred.";
-  }
+  return result.title ?? null;
 }
+
+
+const caseTitle = await getCaseTitle(regardingCaseId);
+console.log(caseTitle);
