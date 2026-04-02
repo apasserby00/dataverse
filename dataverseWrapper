@@ -1,18 +1,33 @@
-async function getCaseTitle(caseId: string): Promise<string | null> {
-  if (!caseId) return null;
+async function runAvailabilitySearch(primaryControl) {
+    const formContext = primaryControl;
+    const requirementGroupId = formContext.data.entity.getId().replace(/[{}]/g, "");
 
-  // remove braces if present
-  const id = caseId.replace(/[{}]/g, "");
+    const request = {
+        Version: "1",
+        RequirementGroup: {
+            msdyn_requirementgroupid: requirementGroupId,
+            "@odata.type": "Microsoft.Dynamics.CRM.msdyn_requirementgroup"
+        },
+        getMetadata: function () {
+            return {
+                boundParameter: null,
+                operationType: 0,
+                operationName: "msdyn_SearchResourceAvailabilityForRequirementGroup",
+                parameterTypes: {
+                    Version: {
+                        typeName: "Edm.String",
+                        structuralProperty: 1
+                    },
+                    RequirementGroup: {
+                        typeName: "mscrm.msdyn_requirementgroup",
+                        structuralProperty: 5
+                    }
+                }
+            };
+        }
+    };
 
-  const result = await Xrm.WebApi.retrieveRecord(
-    "incident",
-    id,
-    "?$select=title"
-  );
-
-  return result.title ?? null;
+    const response = await Xrm.WebApi.online.execute(request);
+    const result = await response.json();
+    console.log(result);
 }
-
-
-const caseTitle = await getCaseTitle(regardingCaseId);
-console.log(caseTitle);
